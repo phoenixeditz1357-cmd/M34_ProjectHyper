@@ -1,87 +1,82 @@
 name: Build HyperOS for M34
 on:
   workflow_dispatch:
-    inputs:
-      gsi_url:
-        description: 'https://sourceforge.net/projects/mystic-gsi-updates/files/HyperOS/Hyperos-duchamp-15-OS2.0.200.3.VNLCNXM-AB-20250416-MysticGSI.zip/download'
-        required: true
-      overlay_url:
-        description: 'https://github.com/phoenixeditz1357-cmd/M34-Gsi-Overlay'
-        required: true
 
 jobs:
   build-rom:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      # 1. Setup the Computer (Install Tools)
+      # 1. Install Tools
       - name: Install Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y zip unzip xz-utils android-sdk-libsparse-utils
-          # Get a tool to modify system images
           wget https://github.com/LonelyFool/lpunpack_and_lpmake/raw/master/make_ext4fs
           chmod +x make_ext4fs
           sudo mv make_ext4fs /usr/local/bin/
 
-      # 2. Download the GSI
-      - name: Download HyperOS GSI
+      # 2. Download Your HyperOS GSI (SourceForge)
+      - name: Download GSI
         run: |
-          echo "Downloading GSI..."
-          wget -O system.img.xz "${{ github.event.inputs.gsi_url }}"
+          echo "Downloading HyperOS..."
+          # Using your specific SourceForge Link
+          wget -O gsi.zip "https://sourceforge.net/projects/mystic-gsi-updates/files/HyperOS/Hyperos-duchamp-15-OS2.0.200.3.VNLCNXM-AB-20250416-MysticGSI.zip/download"
           
-          # If it is compressed (.xz), extract it. If not, rename it.
-          if [[ "${{ github.event.inputs.gsi_url }}" == *.xz ]]; then
-            xz -d system.img.xz
-          else
-            mv system.img.xz system.img
-          fi
+          echo "Extracting GSI..."
+          unzip gsi.zip
+          
+          # Find the image file (it might be named differently inside the zip)
+          # We look for any file ending in .img and rename it to system.img
+          find . -maxdepth 1 -name "*.img" -exec mv {} system.img \;
+          
+          ls -lh system.img
 
-      # 3. Download the Overlay (Your Link)
+      # 3. Download Your M34 Overlay (From this repo)
       - name: Download Overlay
         run: |
-          wget -O overlay.apk "${{ github.event.inputs.overlay_url }}"
+          echo "Downloading M34 Overlay..."
+          # This pulls the file directly from your own repository
+          wget -O overlay.apk "https://github.com/phoenixeditz1357-cmd/M34-Gsi-Overlay/raw/main/treble-overlay-samsung-m34x.apk"
 
-      # 4. The Main Event: Injecting Files
+      # 4. Inject Overlay
       - name: Modify System Image
         run: |
           mkdir -p pmnt
-          # Convert to raw image so we can mount it
+          
+          # Check if image is sparse or raw
           simg2img system.img system_raw.img || mv system.img system_raw.img
           
-          # Mount the image (Open the box)
+          # Mount
           sudo mount -o loop,rw system_raw.img pmnt
           
-          # CREATE THE FOLDER if it doesn't exist
+          # Inject
+          echo "Injecting M34 Overlay into /product/overlay/..."
           sudo mkdir -p pmnt/product/overlay
-          
-          # COPY your overlay into the system
-          echo "Injecting M34 Overlay..."
           sudo cp overlay.apk pmnt/product/overlay/treble-overlay-samsung-m34x.apk
-          
-          # Set permissions (Crucial!)
           sudo chmod 644 pmnt/product/overlay/treble-overlay-samsung-m34x.apk
           
-          # Unmount (Close the box)
+          # Unmount
           sudo umount pmnt
           mv system_raw.img system_mod.img
 
-      # 5. Pack it into a Zip for TWRP
+      # 5. Create Flashable Zip
       - name: Create Flashable Zip
         run: |
           mkdir -p META-INF/com/google/android
           
-          # Write the installation instructions for TWRP
-          echo 'ui_print("Installing Modified HyperOS for M34...");' > META-INF/com/google/android/updater-script
+          # Updater Script
+          echo 'ui_print("Installing HyperOS M34 (Phoenix Edition)...");' > META-INF/com/google/android/updater-script
           echo 'package_extract_file("system.img", "/dev/block/mapper/system");' >> META-INF/com/google/android/updater-script
-          echo 'ui_print("Installation Complete!");' >> META-INF/com/google/android/updater-script
+          echo 'ui_print("Done!");' >> META-INF/com/google/android/updater-script
           
-          # Rename back to system.img and Zip
           mv system_mod.img system.img
-          zip -r HyperOS_M34_Ready.zip system.img META-INF
+          zip -r HyperOS_M34_Phoenix.zip system.img META-INF
 
-      # 6. Upload the Result to You
+      # 6. Upload
       - name: Upload Zip
         uses: actions/upload-artifact@v4
         with:
-          name: HyperOS_M34_Build
-          path: HyperOS_M34_Ready.zip
+          name: HyperOS_M34_Phoenix
+          path: HyperOS_M34_Phoenix.zip
