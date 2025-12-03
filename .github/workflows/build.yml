@@ -1,4 +1,4 @@
-name: Build HyperOS for M34 (Mirror Fix)
+name: Build HyperOS for M34 (Zip Edition)
 on:
   workflow_dispatch:
 
@@ -13,42 +13,45 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y zip unzip xz-utils android-sdk-libsparse-utils e2fsprogs
 
-      - name: Download GSI (Mirror Trick)
+      - name: Download HyperOS GSI
         run: |
-          echo "Downloading HyperOS..."
-          # TRICK: We use 'master.dl.sourceforge.net' to bypass the landing page
           wget --user-agent="Mozilla/5.0" -O gsi.zip "https://master.dl.sourceforge.net/project/mystic-gsi-updates/HyperOS/Hyperos-duchamp-15-OS2.0.200.3.VNLCNXM-AB-20250416-MysticGSI.zip?viasf=1"
-          
-          # Verification: Check if it's actually a zip (Should be > 1GB)
-          ls -lh gsi.zip
-          
-          echo "Extracting GSI..."
           unzip gsi.zip
           find . -maxdepth 1 -name "*.img" -exec mv {} system.img \;
-          ls -lh system.img
 
-      - name: Download M34 Overlay
+      - name: Download Overlay Zip
         run: |
-          wget -O overlay.apk "https://github.com/phoenixeditz1357-cmd/M34-Gsi-Overlay/raw/main/treble-overlay-samsung-m34x.apk"
+          echo "Downloading Overlay Zip..."
+          # Downloading the main branch zip of your repo (easiest way to get all files)
+          wget -O overlay_pack.zip "https://github.com/phoenixeditz1357-cmd/M34-Gsi-Overlay/archive/refs/heads/main.zip"
+          
+          echo "Unzipping Overlay..."
+          unzip overlay_pack.zip
+          
+          # Finding the APK wherever it is hiding
+          find . -name "*.apk" -exec mv {} overlay.apk \;
+          
+          # Check if we found it
+          if [ -f overlay.apk ]; then
+            echo "Found Overlay APK!"
+          else
+            echo "ERROR: No APK found in your repo!"
+            exit 1
+          fi
 
       - name: Modify System Image
         run: |
           mkdir -p pmnt
-          echo "Converting to raw image..."
           if file system.img | grep -q "Android sparse image"; then
             simg2img system.img system_raw.img
           else
             mv system.img system_raw.img
           fi
-          
-          # Expand to prevent space errors
           e2fsck -f -y system_raw.img || true
           resize2fs system_raw.img 7G || true
           
-          echo "Mounting..."
           sudo mount -o loop,rw system_raw.img pmnt
           
-          echo "Injecting Overlay..."
           sudo mkdir -p pmnt/product/overlay
           sudo cp overlay.apk pmnt/product/overlay/treble-overlay-samsung-m34x.apk
           sudo chmod 644 pmnt/product/overlay/treble-overlay-samsung-m34x.apk
