@@ -1,82 +1,259 @@
-name: Build HyperOS for M34 (Module Extractor)
+name: Ultimate M34 HyperOS Builder
 on:
   workflow_dispatch:
 
 jobs:
-  build-rom:
+  build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      - name: Install Tools
+      - name: 🧹 Maximize Disk Space
+        run: |
+          echo "=== Clearing GitHub Runner Cache ==="
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h
+          
+      - name: 📦 Install Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y zip unzip xz-utils android-sdk-libsparse-utils e2fsprogs
-
-      - name: Download HyperOS GSI
+          sudo apt-get install -y \
+            git zip unzip wget curl \
+            simg2img img2simg \
+            android-sdk-libsparse-utils \
+            e2fsprogs brotli xz-utils \
+            python3 python3-pip
+          
+          echo "=== Tools Installed ==="
+          
+      - name: ⬇️ Download HyperOS GSI (Sheng Port)
         run: |
-          wget --user-agent="Mozilla/5.0" -O gsi.zip "https://master.dl.sourceforge.net/project/mystic-gsi-updates/HyperOS/Hyperos-duchamp-15-OS2.0.200.3.VNLCNXM-AB-20250416-MysticGSI.zip?viasf=1"
-          unzip gsi.zip
-          find . -maxdepth 1 -name "*.img" -exec mv {} system.img \;
-
-      - name: Download & Extract Module Zip
+          mkdir -p work
+          cd work
+          
+          echo "=== Downloading HyperOS GSI from SourceForge ==="
+          wget --progress=bar:force:noscroll \
+            -O hyperos.zip \
+            "https://sourceforge.net/projects/mystic-gsi-updates/files/HyperOS/Hyperos-shennong-15-OS2.0.6.0.VNBCNXM-AB-20241207-MysticGSI.zip/download"
+          
+          echo "=== Extracting GSI ==="
+          unzip -q hyperos.zip
+          
+          # Find system.img (could be named differently)
+          SYSTEM_IMG=$(find . -name "*.img" | head -n 1)
+          mv "$SYSTEM_IMG" system_original.img
+          
+          # Convert sparse to raw if needed
+          simg2img system_original.img system_raw.img || mv system_original.img system_raw.img
+          
+          echo "=== GSI Downloaded & Extracted ==="
+          ls -lh
+          
+      - name: 🔧 Mount System & Deep Debloat
         run: |
-          echo "Downloading your Repo..."
-          # Download your repo as a zip
-          wget -O repo.zip "https://github.com/phoenixeditz1357-cmd/M34-Gsi-Overlay/archive/refs/heads/main.zip"
-          unzip repo.zip
+          cd work
+          mkdir -p mnt
           
-          echo "Hunting for the Module Zip..."
-          # Find the zip file you uploaded (ignoring the repo zip itself)
-          find . -name "*.zip" ! -name "repo.zip" ! -name "gsi.zip" -exec mv {} module_fix.zip \;
+          echo "=== Mounting System Image ==="
+          sudo mount -o loop,rw system_raw.img mnt/
           
-          echo "Unzipping the Module..."
-          unzip -o module_fix.zip -d module_content
+          echo "=== HEAVY DEBLOATING STARTED ==="
           
-          echo "Finding the Overlay APK inside the module..."
-          # Look for ANY apk inside the module folder
-          find module_content -name "*.apk" -exec mv {} overlay.apk \;
+          # Remove Xiaomi Bloatware (Aggressive)
+          sudo rm -rf mnt/system/app/MiBrowser
+          sudo rm -rf mnt/system/app/MiVideo
+          sudo rm -rf mnt/system/app/MiMusic
+          sudo rm -rf mnt/system/app/MiGallery
+          sudo rm -rf mnt/system/app/MiCalendar
+          sudo rm -rf mnt/system/app/MiDrive
+          sudo rm -rf mnt/system/app/MSA
+          sudo rm -rf mnt/system/app/AnalyticsCore
+          sudo rm -rf mnt/system/app/Joyose
+          sudo rm -rf mnt/system/priv-app/MiShare
+          sudo rm -rf mnt/system/priv-app/MiuiScanner
+          sudo rm -rf mnt/system/priv-app/SecurityCenter
+          sudo rm -rf mnt/system/priv-app/PersonalAssistant
+            
+          echo "=== Bloat Removed ==="
           
-          if [ -f overlay.apk ]; then
-            echo "SUCCESS: Found Overlay APK inside your module!"
-          else
-            echo "ERROR: Could not find an APK inside your module zip."
-            echo "Listing module content for debug:"
-            find module_content
-            exit 1
-          fi
-
-      - name: Modify System Image
+      - name: 🔥 Download M34 Overlay
         run: |
-          mkdir -p pmnt
-          if file system.img | grep -q "Android sparse image"; then
-            simg2img system.img system_raw.img
-          else
-            mv system.img system_raw.img
-          fi
-          e2fsck -f -y system_raw.img || true
-          resize2fs system_raw.img 7G || true
+          cd work
+          echo "=== Downloading M34 Overlay ==="
           
-          sudo mount -o loop,rw system_raw.img pmnt
+          sudo mkdir -p mnt/system/product/overlay/
+          sudo wget -O mnt/system/product/overlay/treble-overlay-samsung-m34x.apk \
+            "https://github.com/phoenixeditz1357-cmd/M34-Gsi-Overlay/raw/main/treble-overlay-samsung-m34x.apk"
           
-          sudo mkdir -p pmnt/product/overlay
-          sudo cp overlay.apk pmnt/product/overlay/treble-overlay-samsung-m34x.apk
-          sudo chmod 644 pmnt/product/overlay/treble-overlay-samsung-m34x.apk
+          sudo chmod 644 mnt/system/product/overlay/treble-overlay-samsung-m34x.apk
           
-          sudo umount pmnt
-          mv system_raw.img system.img
-
-      - name: Create Flashable Zip
+          echo "=== Overlay Injected ==="
+          
+      - name: 📲 Inject M34 System Files from Dump
         run: |
-          mkdir -p META-INF/com/google/android
-          echo 'ui_print("Installing HyperOS M34 (Phoenix)...");' > META-INF/com/google/android/updater-script
-          echo 'package_extract_file("system.img", "/dev/block/mapper/system");' >> META-INF/com/google/android/updater-script
-          echo 'ui_print("Done!");' >> META-INF/com/google/android/updater-script
+          cd work
+          echo "=== Cloning Samsung M34 Dump ==="
           
-          zip -r HyperOS_M34_Phoenix.zip system.img META-INF
+          # Clone only essential files (shallow clone to save space)
+          git clone --depth=1 --filter=blob:none --sparse \
+            https://dumps.tadiphone.dev/dumps/samsung/m34x.git m34_dump
+          
+          cd m34_dump
+          git sparse-checkout set system/build.prop vendor/build.prop
+          
+          cd ..
+          
+          echo "=== Injecting M34 Build Properties ==="
+          
+          # Backup original build.prop
+          sudo cp mnt/system/build.prop mnt/system/build.prop.bak
+          
+          # Extract critical Samsung M34 properties
+          sudo bash -c "cat >> mnt/system/build.prop" << 'EOF'
 
-      - name: Upload Zip
+# === SAMSUNG GALAXY M34 IDENTITY ===
+ro.product.model=SM-M346B
+ro.product.brand=samsung
+ro.product.name=m34xzh
+ro.product.device=m34x
+ro.product.board=s5e8825
+ro.product.manufacturer=samsung
+ro.board.platform=exynos9825
+
+# === M34 Display & Hardware ===
+ro.sf.lcd_density=450
+persist.sys.sf.native_mode=2
+ro.surface_flinger.max_frame_buffer_acquired_buffers=3
+ro.vendor.display.sensortype=2
+debug.sf.enable_hwc_vds=1
+
+# === VoLTE & IMS Optimization ===
+persist.dbg.volte_avail_ovr=1
+persist.dbg.vt_avail_ovr=1
+persist.dbg.wfc_avail_ovr=1
+persist.radio.VT_HYBRID_ENABLE=1
+persist.vendor.radio.enableadvancedscan=true
+persist.vendor.radio.rat_on=combine
+
+# === LTE & Network Optimization ===
+ro.telephony.default_network=10,10
+persist.data.df.dev_name=rmnet_usb0
+persist.sys.usb.config=mtp,adb
+persist.vendor.radio.apm_sim_not_pwdn=1
+persist.vendor.radio.sib16_support=1
+persist.vendor.radio.custom_ecc=1
+
+# === Samsung Storage & SD Card Fix ===
+persist.sys.fuse.passthrough.enable=true
+persist.sys.sdcardfs=force_on
+ro.crypto.volume.filenames_mode=aes-256-cts
+
+# === Battery & Performance ===
+ro.config.low_ram=false
+ro.vendor.qti.sys.fw.bservice_enable=true
+pm.dexopt.bg-dexopt=speed-profile
+EOF
+
+          echo "=== M34 Properties Injected ==="
+          
+      - name: 📡 Optimize VoLTE & Telephony
+        run: |
+          cd work
+          
+          echo "=== Creating VoLTE Configuration Files ==="
+          
+          # Create carrier config for Samsung M34
+          sudo mkdir -p mnt/system/etc/CarrierSettings/
+          
+          sudo bash -c "cat > mnt/system/etc/CarrierSettings/carrier_config_m34.xml" << 'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<carrier_config>
+    <boolean name="carrier_volte_available_bool" value="true" />
+    <boolean name="carrier_vt_available_bool" value="true" />
+    <boolean name="carrier_wfc_ims_available_bool" value="true" />
+    <boolean name="enhanced_4g_lte_on_by_default_bool" value="true" />
+    <boolean name="editable_enhanced_4g_lte_bool" value="true" />
+    <boolean name="hide_enhanced_4g_lte_bool" value="false" />
+    <boolean name="ignore_data_enabled_changed_for_video_calls" value="false" />
+</carrier_config>
+EOF
+
+          echo "=== VoLTE Config Created ==="
+          
+      - name: 🎨 Apply Final Optimizations
+        run: |
+          cd work
+          
+          echo "=== Applying Final Tweaks ==="
+          
+          # Force GPU Rendering
+          sudo bash -c "echo 'ro.hwui.renderer=skiagl' >> mnt/system/build.prop"
+          sudo bash -c "echo 'debug.hwui.render_dirty_regions=false' >> mnt/system/build.prop"
+          
+          # Smoother Animations
+          sudo bash -c "echo 'windowsmgr.max_events_per_sec=150' >> mnt/system/build.prop"
+          sudo bash -c "echo 'debug.choreographer.vsync=1' >> mnt/system/build.prop"
+          
+          # Disable Logging (Performance Boost)
+          sudo bash -c "echo 'ro.logd.size=64K' >> mnt/system/build.prop"
+          sudo bash -c "echo 'persist.logd.limit=OFF' >> mnt/system/build.prop"
+          
+          echo "=== Optimizations Complete ==="
+          
+      - name: 📦 Unmount & Repack System
+        run: |
+          cd work
+          
+          echo "=== Unmounting System ==="
+          sudo umount mnt/
+          
+          echo "=== Converting to Sparse Image ==="
+          img2simg system_raw.img system_optimized.img
+          
+          echo "=== Creating Flashable Zip ==="
+          
+          # Create META-INF structure
+          mkdir -p META-INF/com/google/android/
+          
+          cat > META-INF/com/google/android/update-binary << 'EOF'
+#!/sbin/sh
+OUTFD=$2
+ZIP=$3
+
+ui_print() {
+  echo "ui_print $1" > /proc/self/fd/$OUTFD
+  echo "ui_print" > /proc/self/fd/$OUTFD
+}
+
+ui_print "========================================="
+ui_print "  Ultimate M34 HyperOS by PhoenixEditz  "
+ui_print "========================================="
+ui_print " "
+ui_print "Flashing Optimized System..."
+
+package_extract_file system_optimized.img /dev/block/mapper/system
+
+ui_print " "
+ui_print "Installation Complete!"
+ui_print "Wipe Data & Reboot to enjoy HyperOS!"
+exit 0
+EOF
+
+          cat > META-INF/com/google/android/updater-script << 'EOF'
+package_extract_file("system_optimized.img", "/dev/block/mapper/system");
+EOF
+
+          chmod 755 META-INF/com/google/android/update-binary
+          
+          # Create final zip (Store compression for TWRP compatibility)
+          zip -0 -r Ultimate_HyperOS_M34_$(date +%Y%m%d).zip system_optimized.img META-INF
+          
+          ls -lh *.zip
+          
+      - name: ⬆️ Upload ROM
         uses: actions/upload-artifact@v4
         with:
-          name: HyperOS_M34_Phoenix
-          path: HyperOS_M34_Phoenix.zip
+          name: Ultimate_HyperOS_M34
+          path: work/Ultimate_HyperOS_M34_*.zip
