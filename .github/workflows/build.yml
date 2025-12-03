@@ -1,4 +1,4 @@
-name: Build HyperOS for M34 (Zip Edition)
+name: Build HyperOS for M34 (Module Extractor)
 on:
   workflow_dispatch:
 
@@ -19,23 +19,30 @@ jobs:
           unzip gsi.zip
           find . -maxdepth 1 -name "*.img" -exec mv {} system.img \;
 
-      - name: Download Overlay Zip
+      - name: Download & Extract Module Zip
         run: |
-          echo "Downloading Overlay Zip..."
-          # Downloading the main branch zip of your repo (easiest way to get all files)
-          wget -O overlay_pack.zip "https://github.com/phoenixeditz1357-cmd/M34-Gsi-Overlay/archive/refs/heads/main.zip"
+          echo "Downloading your Repo..."
+          # Download your repo as a zip
+          wget -O repo.zip "https://github.com/phoenixeditz1357-cmd/M34-Gsi-Overlay/archive/refs/heads/main.zip"
+          unzip repo.zip
           
-          echo "Unzipping Overlay..."
-          unzip overlay_pack.zip
+          echo "Hunting for the Module Zip..."
+          # Find the zip file you uploaded (ignoring the repo zip itself)
+          find . -name "*.zip" ! -name "repo.zip" ! -name "gsi.zip" -exec mv {} module_fix.zip \;
           
-          # Finding the APK wherever it is hiding
-          find . -name "*.apk" -exec mv {} overlay.apk \;
+          echo "Unzipping the Module..."
+          unzip -o module_fix.zip -d module_content
           
-          # Check if we found it
+          echo "Finding the Overlay APK inside the module..."
+          # Look for ANY apk inside the module folder
+          find module_content -name "*.apk" -exec mv {} overlay.apk \;
+          
           if [ -f overlay.apk ]; then
-            echo "Found Overlay APK!"
+            echo "SUCCESS: Found Overlay APK inside your module!"
           else
-            echo "ERROR: No APK found in your repo!"
+            echo "ERROR: Could not find an APK inside your module zip."
+            echo "Listing module content for debug:"
+            find module_content
             exit 1
           fi
 
