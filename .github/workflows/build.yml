@@ -1,4 +1,4 @@
-name: Build HyperOS for M34
+name: Build HyperOS for M34 (Fixed Tools)
 on:
   workflow_dispatch:
 
@@ -8,70 +8,73 @@ jobs:
     permissions:
       contents: write
     steps:
-      # 1. Install Tools
+      # 1. Install Standard Android Tools (No dead links)
       - name: Install Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y zip unzip xz-utils android-sdk-libsparse-utils
-          wget https://github.com/LonelyFool/lpunpack_and_lpmake/raw/master/make_ext4fs
-          chmod +x make_ext4fs
-          sudo mv make_ext4fs /usr/local/bin/
+          sudo apt-get install -y zip unzip xz-utils android-sdk-libsparse-utils e2fsprogs
 
-      # 2. Download Your HyperOS GSI (SourceForge)
+      # 2. Download Your HyperOS GSI
       - name: Download GSI
         run: |
           echo "Downloading HyperOS..."
-          # Using your specific SourceForge Link
-          wget -O gsi.zip "https://sourceforge.net/projects/mystic-gsi-updates/files/HyperOS/Hyperos-duchamp-15-OS2.0.200.3.VNLCNXM-AB-20250416-MysticGSI.zip/download"
+          # Using --user-agent to prevent 403 errors
+          wget --user-agent="Mozilla/5.0" -O gsi.zip "https://sourceforge.net/projects/mystic-gsi-updates/files/HyperOS/Hyperos-duchamp-15-OS2.0.200.3.VNLCNXM-AB-20250416-MysticGSI.zip/download"
           
           echo "Extracting GSI..."
           unzip gsi.zip
-          
-          # Find the image file (it might be named differently inside the zip)
-          # We look for any file ending in .img and rename it to system.img
           find . -maxdepth 1 -name "*.img" -exec mv {} system.img \;
-          
           ls -lh system.img
 
-      # 3. Download Your M34 Overlay (From this repo)
+      # 3. Download Your M34 Overlay
       - name: Download Overlay
         run: |
-          echo "Downloading M34 Overlay..."
-          # This pulls the file directly from your own repository
           wget -O overlay.apk "https://github.com/phoenixeditz1357-cmd/M34-Gsi-Overlay/raw/main/treble-overlay-samsung-m34x.apk"
 
-      # 4. Inject Overlay
+      # 4. Inject Overlay (Using Loop Mount)
       - name: Modify System Image
         run: |
           mkdir -p pmnt
           
-          # Check if image is sparse or raw
-          simg2img system.img system_raw.img || mv system.img system_raw.img
+          # Convert sparse to raw (using standard simg2img)
+          echo "Converting to raw image..."
+          if file system.img | grep -q "Android sparse image"; then
+            simg2img system.img system_raw.img
+          else
+            mv system.img system_raw.img
+          fi
+          
+          # Expand size slightly to fit new file (add 50MB)
+          # This prevents "No space left on device" errors
+          e2fsck -f -y system_raw.img || true
+          resize2fs system_raw.img 7G || true
           
           # Mount
+          echo "Mounting..."
           sudo mount -o loop,rw system_raw.img pmnt
           
           # Inject
-          echo "Injecting M34 Overlay into /product/overlay/..."
+          echo "Injecting M34 Overlay..."
           sudo mkdir -p pmnt/product/overlay
           sudo cp overlay.apk pmnt/product/overlay/treble-overlay-samsung-m34x.apk
           sudo chmod 644 pmnt/product/overlay/treble-overlay-samsung-m34x.apk
           
           # Unmount
           sudo umount pmnt
-          mv system_raw.img system_mod.img
+          
+          # Convert back to sparse (Optional, makes zip smaller)
+          # img2simg system_raw.img system.img
+          # We'll keep it raw for better compatibility with TWRP flashing
+          mv system_raw.img system.img
 
       # 5. Create Flashable Zip
       - name: Create Flashable Zip
         run: |
           mkdir -p META-INF/com/google/android
-          
-          # Updater Script
-          echo 'ui_print("Installing HyperOS M34 (Phoenix Edition)...");' > META-INF/com/google/android/updater-script
+          echo 'ui_print("Installing HyperOS M34 (Phoenix)...");' > META-INF/com/google/android/updater-script
           echo 'package_extract_file("system.img", "/dev/block/mapper/system");' >> META-INF/com/google/android/updater-script
           echo 'ui_print("Done!");' >> META-INF/com/google/android/updater-script
           
-          mv system_mod.img system.img
           zip -r HyperOS_M34_Phoenix.zip system.img META-INF
 
       # 6. Upload
