@@ -1,0 +1,142 @@
+name: Build HyperOS Ultimate for M34
+on:
+  workflow_dispatch:
+    inputs:
+      gsi_url:
+        description: 'GSI Source (Sheng/Mystic)'
+        required: true
+        default: 'https://sourceforge.net/projects/mystic-gsi-updates/files/HyperOS/Hyperos-shennong-15-OS2.0.6.0.VNBCNXM-AB-20241207-MysticGSI.zip/download'
+      overlay_repo:
+        description: 'Your Overlay Repo'
+        required: true
+        default: 'https://github.com/phoenixeditz1357-cmd/M34-Gsi-Overlay'
+
+jobs:
+  build_hyperos_m34:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 1. Cleanup & Space Prep (Critical for 14GB Limit)
+        run: |
+          # Brutal cleaning to free up 12GB+ space
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo apt-get clean
+          df -h
+
+      - name: 2. Install Android Image Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git zip unzip curl python3 android-sdk-libsparse-utils e2fsprogs
+          
+          # Install simg2img (needed to open the system image)
+          wget https://raw.githubusercontent.com/xpirt/sdat2img/master/sdat2img.py
+          chmod +x sdat2img.py
+
+      - name: 3. Download & Extract GSI
+        run: |
+          mkdir work
+          cd work
+          echo "Downloading Sheng HyperOS..."
+          wget -O rom.zip "${{ inputs.gsi_url }}"
+          
+          echo "Unzipping..."
+          # Handling Sourceforge's redirect or zip structure
+          unzip rom.zip
+          
+          # Locate the image file (it might be named differently)
+          GSI_IMG=$(find . -name "*.img" | head -n 1)
+          mv "$GSI_IMG" system.img
+          
+          # Expand if it's sparse (optimize for mounting)
+          if file system.img | grep -q "sparse"; then
+            echo "Converting sparse image..."
+            simg2img system.img system_raw.img
+            rm system.img
+          else
+            mv system.img system_raw.img
+          fi
+
+      - name: 4. Mount System Image
+        run: |
+          cd work
+          mkdir -p mnt/system
+          # Mount as Read/Write
+          sudo mount -o loop,rw system_raw.img mnt/system
+
+      - name: 5. HEAVY Debloat (Safe List)
+        run: |
+          S_DIR="work/mnt/system/system"
+          echo "Debloating Xiaomi Junk..."
+          
+          # REMOVE ADS & ANALYTICS (Keeps System Stable)
+          sudo rm -rf $S_DIR/app/MSA
+          sudo rm -rf $S_DIR/app/AnalyticsCore
+          sudo rm -rf $S_DIR/app/HybridAccess
+          sudo rm -rf $S_DIR/app/MiBrowserGlobal
+          sudo rm -rf $S_DIR/app/MiVideoGlobal
+          sudo rm -rf $S_DIR/app/MiMusic
+          sudo rm -rf $S_DIR/priv-app/MiShare
+          sudo rm -rf $S_DIR/priv-app/MiCoin
+          
+          # WE KEEP: GmsCore (Google Services), MiLauncher (HyperOS Home), XiaomiServiceFramework (Required for Boot)
+          echo "Debloat Complete."
+
+      - name: 6. Inject M34 Overlay (From Your Repo)
+        run: |
+          echo "Downloading Overlay..."
+          # Clone your repo to get the APK
+          git clone ${{ inputs.overlay_repo }} overlay_temp
+          
+          # Inject into /product/overlay/ (Standard Android 14 Location)
+          sudo mkdir -p work/mnt/system/system/product/overlay/
+          sudo cp overlay_temp/*.apk work/mnt/system/system/product/overlay/treble-overlay-samsung-m34x.apk
+          
+          # Set Permissions
+          sudo chmod 644 work/mnt/system/system/product/overlay/treble-overlay-samsung-m34x.apk
+          echo "Overlay Injected."
+
+      - name: 7. The 'Frankenstein' Code Swap (Dump Integration)
+        run: |
+          BUILD_PROP="work/mnt/system/system/build.prop"
+          
+          echo "--- MODIFIYING IDENTITY ---"
+          # 1. HYPEROS UNLOCKER: Keep Brand as Xiaomi (so HyperOS features work)
+          # but set Model to 'Xiaomi 14' to unlock High-End Blur/Animations
+          sudo sed -i 's/ro.product.model=.*/ro.product.model=Xiaomi 14/g' $BUILD_PROP
+          sudo sed -i 's/ro.product.device=.*/ro.product.device=houji/g' $BUILD_PROP
+          
+          # 2. M34 HARDWARE IDENTITY (Spoofing for SafetyNet)
+          # We inject the M34 Fingerprint so Banking Apps think it's an M34
+          # (Values taken from standard M34 dump data)
+          echo "ro.build.fingerprint=samsung/m34x/m34x:14/UP1A.231005.007/M346BXXS3CXE1:user/release-keys" | sudo tee -a $BUILD_PROP
+          echo "ro.build.description=m34x-user 14 UP1A.231005.007 M346BXXS3CXE1 release-keys" | sudo tee -a $BUILD_PROP
+
+          # 3. SAMSUNG OPTIMIZATIONS (VoLTE & Storage)
+          echo "# M34 Specific Tweaks" | sudo tee -a $BUILD_PROP
+          # Fix for Samsung Storage/SD Card
+          echo "persist.sys.fuse.passthrough.enable=true" | sudo tee -a $BUILD_PROP
+          # Force VoLTE availability
+          echo "persist.dbg.ims_volte_enable=1" | sudo tee -a $BUILD_PROP
+          echo "persist.sys.phh.ims.volte=true" | sudo tee -a $BUILD_PROP
+          # Screen 120Hz Force
+          echo "ro.surface_flinger.max_frame_buffer_acquired_buffers=3" | sudo tee -a $BUILD_PROP
+          
+          echo "Build.prop Modified."
+
+      - name: 8. Repack & Zip
+        run: |
+          cd work
+          sudo umount mnt/system
+          
+          echo "Repacking Image..."
+          # Compress back to Android Sparse Image
+          img2simg system_raw.img system_m34_hyperos.img
+          
+          echo "Zipping..."
+          # ZIP STORE (Level 0) - Vital for TWRP compatibility
+          zip -0 -r HyperOS_M34_Frankenstein.zip system_m34_hyperos.img
+
+      - name: 9. Upload Result
+        uses: actions/upload-artifact@v4
+        with:
+          name: HyperOS_M34_Build
+          path: work/HyperOS_M34_Frankenstein.zip
