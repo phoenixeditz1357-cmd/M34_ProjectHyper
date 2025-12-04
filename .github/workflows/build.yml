@@ -1,15 +1,14 @@
-name: Build HyperOS 2.0 M34 (Duchamp Gold)
+name: Build HyperOS Houji Native (M34 Safe)
 on:
   workflow_dispatch:
     inputs:
-      # USING THE WORKING DUCHAMP BASE
       gsi_url:
-        description: 'HyperOS 2.0 Duchamp URL'
+        description: 'HyperOS Houji URL'
         required: true
-        default: 'https://sourceforge.net/projects/mystic-gsi-updates/files/HyperOS/Hyperos-duchamp-15-OS2.0.6.0.VNBCNXM-AB-20241207-MysticGSI.zip/download'
+        default: 'https://sourceforge.net/projects/mystic-gsi-updates/files/HyperOS/Hyperos-houji-VanillaIceCream-V816.0.240520.1.VNCCNXM.PRE-DPP-AB-20240524-MysticGSI.zip/download'
 
 jobs:
-  build_duchamp_refined:
+  build_houji_final:
     runs-on: ubuntu-latest
     steps:
       - name: 1. Setup Tools
@@ -21,17 +20,27 @@ jobs:
           wget https://raw.githubusercontent.com/xpirt/sdat2img/master/sdat2img.py
           chmod +x sdat2img.py
 
-      - name: 2. Download Duchamp
+      - name: 2. Download GSI
         run: |
           mkdir work
           cd work
           wget -O rom.zip "${{ inputs.gsi_url }}"
           unzip rom.zip
           
-          # Handle File Name
+          # Find the IMG file (regardless of name)
           FOUND_IMG=$(find . -maxdepth 1 -name "*.img" | head -n 1)
-          if [ "$FOUND_IMG" != "./system.img" ] && [ "$FOUND_IMG" != "system.img" ]; then mv "$FOUND_IMG" system.img; fi
           
+          if [ -z "$FOUND_IMG" ]; then
+             echo "ERROR: No .img file found in zip!"
+             exit 1
+          fi
+
+          # Rename if not already system.img
+          if [ "$FOUND_IMG" != "./system.img" ] && [ "$FOUND_IMG" != "system.img" ]; then 
+             mv "$FOUND_IMG" system.img
+          fi
+          
+          # De-Sparse if needed
           if file system.img | grep -q "sparse"; then
             simg2img system.img system_raw.img
             rm system.img
@@ -45,61 +54,62 @@ jobs:
           mkdir -p mnt/system
           sudo mount -o loop,rw system_raw.img mnt/system
 
-      - name: 4. Debloat AI (The "Clean" Logic)
+      - name: 4. Debloat (Safe Mode)
         run: |
           S_DIR="work/mnt/system/system"
-          # Remove Heavy AI Apps (Saves RAM + Battery)
-          sudo rm -rf $S_DIR/app/AiAsstVision
-          sudo rm -rf $S_DIR/app/VoiceTrigger
-          sudo rm -rf $S_DIR/app/MiAi*
+          # Remove only known crash-causing apps for Exynos
+          sudo rm -rf $S_DIR/priv-app/Updater
           sudo rm -rf $S_DIR/app/MSA
           sudo rm -rf $S_DIR/app/AnalyticsCore
-          # NOTE: We leave Gallery/Lockscreen untouched for features!
 
       - name: 5. Inject Overlay (Auto-Detect)
         run: |
           git clone https://github.com/phoenixeditz1357-cmd/M34-Overlays overlay_repo
+          
           OVERLAY_APK=$(find overlay_repo -name "*.apk" | head -n 1)
+          
           if [ -f "$OVERLAY_APK" ]; then
+             echo "Found Overlay: $OVERLAY_APK"
+             
              TARGET="work/mnt/system/product/overlay"
-             if [ ! -d "$TARGET" ]; then TARGET="work/mnt/system/system/product/overlay"; fi
+             if [ ! -d "$TARGET" ]; then 
+                TARGET="work/mnt/system/system/product/overlay"
+             fi
+             
              sudo mkdir -p "$TARGET"
              sudo cp "$OVERLAY_APK" "$TARGET/treble-overlay-samsung-m34x.apk"
              sudo chmod 644 "$TARGET/treble-overlay-samsung-m34x.apk"
-             echo "Overlay Injected"
+             echo "Overlay Successfully Injected"
+          else
+             echo "WARNING: No APK found in repo. Proceeding without overlay."
           fi
 
-      - name: 6. The Hybrid Identity (Bootable + Features)
+      - name: 6. Apply Exynos Fixes (Identity & Signal)
         run: |
           PROP="work/mnt/system/system/build.prop"
           
-          # 1. SYSTEM IDENTITY (Keep Duchamp for Boot Stability)
-          # We DO NOT change 'ro.product.name' or 'ro.board' to avoid bootloop.
-          
-          # 2. FEATURE SPOOF (Trick specific apps)
-          # We add these flags to enable High-End UI without breaking boot.
-          echo "ro.surface_flinger.max_frame_buffer_acquired_buffers=3" | sudo tee -a $PROP
-          echo "ro.miui.ui.version.code=14" | sudo tee -a $PROP
-          
-          # 3. LOCKSCREEN TRICK (The Secret Sauce)
-          # Instead of changing the whole device name, we force the 'device' prop ONLY at the end.
-          # This often bypasses the boot check but tricks the Lockscreen app.
-          echo "ro.product.device=houji" | sudo tee -a $PROP
-          
-          # 4. M34 APP COMPATIBILITY
-          echo "ro.build.fingerprint=samsung/m34x/m34x:14/UP1A.231005.007/M346BXXS3CXE1:user/release-keys" | sudo tee -a $PROP
+          # 1. Signal / SIM Fix
           echo "persist.dbg.ims_volte_enable=1" | sudo tee -a $PROP
+          echo "ro.build.fingerprint=samsung/m34x/m34x:14/UP1A.231005.007/M346BXXS3CXE1:user/release-keys" | sudo tee -a $PROP
+          
+          # 2. Storage Fix (Prevent 0MB bug)
           echo "persist.sys.fuse.passthrough.enable=true" | sudo tee -a $PROP
+          
+          # 3. Smoothness
+          echo "ro.surface_flinger.max_frame_buffer_acquired_buffers=3" | sudo tee -a $PROP
+          
+          # 4. Native Identity (Since it is Houji, we enforce Houji UI code)
+          echo "ro.miui.ui.version.code=14" | sudo tee -a $PROP
 
       - name: 7. Repack
         run: |
           cd work
           sudo umount mnt/system
-          img2simg system_raw.img system_duchamp_refined.img
-          zip -0 -r HyperOS_2.0_M34_Refined.zip system_duchamp_refined.img
+          img2simg system_raw.img system_houji_m34.img
+          zip -0 -r HyperOS_Houji_M34.zip system_houji_m34.img
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: HyperOS_2.0_M34_Refined
-          path: work/HyperOS_2.0_M34_Refined.zip
+          name: HyperOS_Houji_M34
+          path: work/HyperOS_Houji_M34.zip
