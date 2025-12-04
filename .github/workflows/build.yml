@@ -1,19 +1,14 @@
-name: Build HyperOS Duchamp M34 (Gold Edition)
+name: Build HyperOS M34 Optimized (No GApps + Charging Fix)
 on:
   workflow_dispatch:
     inputs:
       gsi_url:
-        description: 'HyperOS Duchamp (A15) URL'
+        description: 'HyperOS Duchamp URL'
         required: true
         default: 'https://sourceforge.net/projects/mystic-gsi-updates/files/HyperOS/Hyperos-duchamp-15-OS2.0.200.3.VNLCNXM-AB-20250416-MysticGSI.zip/download'
-      gapps_url:
-        description: 'LiteGApps URL (Direct Download)'
-        required: true
-        # Using a specific file link derived from your folder to ensure download works
-        default: 'https://sourceforge.net/projects/litegapps/files/litegapps/arm64/35/lite/v3.0/LiteGApps-Arm64-35-Lite-v3.0.zip/download'
 
 jobs:
-  build_duchamp_gold:
+  build_optimized_m34:
     runs-on: ubuntu-latest
     steps:
       - name: 1. Setup Tools
@@ -21,11 +16,11 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
           sudo apt-get clean
           sudo apt-get update
-          sudo apt-get install -y git zip unzip android-sdk-libsparse-utils wget tar
+          sudo apt-get install -y git zip unzip android-sdk-libsparse-utils wget
           wget https://raw.githubusercontent.com/xpirt/sdat2img/master/sdat2img.py
           chmod +x sdat2img.py
 
-      - name: 2. Download ROM & GApps
+      - name: 2. Download ROM
         run: |
           mkdir work
           cd work
@@ -33,12 +28,7 @@ jobs:
           wget -O rom.zip "${{ inputs.gsi_url }}"
           unzip rom.zip
           
-          echo "Downloading GApps..."
-          wget -O gapps.zip "${{ inputs.gapps_url }}"
-          mkdir gapps_extract
-          unzip gapps.zip -d gapps_extract
-          
-          # Prepare System Image
+          # Auto-Find & Prepare IMG
           FOUND_IMG=$(find . -maxdepth 1 -name "*.img" | head -n 1)
           if [ "$FOUND_IMG" != "./system.img" ] && [ "$FOUND_IMG" != "system.img" ]; then mv "$FOUND_IMG" system.img; fi
           
@@ -55,34 +45,15 @@ jobs:
           mkdir -p mnt/system
           sudo mount -o loop,rw system_raw.img mnt/system
 
-      - name: 4. Debloat (Careful Mode)
+      - name: 4. Debloat (Just AI Junk)
         run: |
           S_DIR="work/mnt/system/system"
-          # ONLY removing useless AI bloat. NOT touching Treble settings.
+          # Keeping it minimal to avoid breaking system
           sudo rm -rf $S_DIR/app/MSA
           sudo rm -rf $S_DIR/app/AnalyticsCore
           sudo rm -rf $S_DIR/app/AiAsstVision
-          sudo rm -rf $S_DIR/priv-app/Updater
-          # User requested NO Treble app deletion, so we skip that.
 
-      - name: 5. Install LiteGApps (Android 15)
-        run: |
-          echo "Injecting GApps..."
-          S_DIR="work/mnt/system/system"
-          
-          # LiteGApps extraction logic
-          if [ -d "work/gapps_extract/system" ]; then
-             sudo cp -r work/gapps_extract/system/* $S_DIR/
-          else
-             # Fallback if zip structure is flat
-             sudo cp -r work/gapps_extract/* $S_DIR/ 2>/dev/null || true
-          fi
-          
-          # Fix Permissions
-          sudo chmod -R 755 $S_DIR/priv-app/Phonesky
-          sudo chmod -R 755 $S_DIR/priv-app/GmsCore || true
-
-      - name: 6. Inject M34 Overlay
+      - name: 5. Inject Overlay
         run: |
           git clone https://github.com/phoenixeditz1357-cmd/M34-Overlays overlay_repo
           OVERLAY_APK=$(find overlay_repo -name "*.apk" | head -n 1)
@@ -95,40 +66,41 @@ jobs:
              echo "Overlay Injected."
           fi
 
-      - name: 7. Apply Fixes (Storage + AOD + Wake Delay)
+      - name: 6. Apply Optimizations (Storage + Charge + AOD)
         run: |
           PROP="work/mnt/system/system/build.prop"
           
-          # --- A. STORAGE FIX (Correct Size Detection) ---
+          # --- A. EXTERNAL STORAGE & SD CARD FIX ---
           echo "persist.sys.fuse.passthrough.enable=true" | sudo tee -a $PROP
           echo "ro.storage_manager.enabled=true" | sudo tee -a $PROP
+          # Fixes encryption mismatch that hides SD Cards
+          echo "ro.crypto.volume.filenames_mode=aes-256-cts" | sudo tee -a $PROP
           
-          # --- B. WAKE DELAY FIX (Screen On Speed) ---
-          # Disables deep idle states for display to speed up wake
-          echo "ro.surface_flinger.set_idle_timer_ms=0" | sudo tee -a $PROP
-          echo "ro.surface_flinger.set_touch_timer_ms=0" | sudo tee -a $PROP
-          echo "ro.surface_flinger.set_display_power_timer_ms=0" | sudo tee -a $PROP
-          # Fixes brightness ramp-up delay
-          echo "persist.sys.qcom-brightness=1" | sudo tee -a $PROP
+          # --- B. CHARGING ANIMATION FIX ---
+          # Tells the OS to respect the offline charging mode
+          echo "ro.charger.enable_suspend=true" | sudo tee -a $PROP
+          echo "ro.charger.no_ui=false" | sudo tee -a $PROP
+          # Ensures the screen wakes up when plugged in
+          echo "ro.enable_boot_charger_mode=true" | sudo tee -a $PROP
           
           # --- C. AOD & LOCKSCREEN EDITOR ---
-          # Spoof Xiaomi 14 (Houji) Identity
           echo "ro.product.device=houji" | sudo tee -a $PROP
           echo "ro.miui.ui.version.code=14" | sudo tee -a $PROP
           
-          # --- D. M34 HARDWARE MATCHING ---
-          echo "persist.dbg.ims_volte_enable=1" | sudo tee -a $PROP
-          echo "ro.build.fingerprint=samsung/m34x/m34x:14/UP1A.231005.007/M346BXXS3CXE1:user/release-keys" | sudo tee -a $PROP
+          # --- D. WAKE DELAY & BRIGHTNESS FIX ---
+          echo "ro.surface_flinger.set_idle_timer_ms=0" | sudo tee -a $PROP
+          echo "ro.surface_flinger.set_display_power_timer_ms=0" | sudo tee -a $PROP
+          echo "persist.sys.qcom-brightness=1" | sudo tee -a $PROP
 
-      - name: 8. Repack
+      - name: 7. Repack
         run: |
           cd work
           sudo umount mnt/system
-          img2simg system_raw.img system_duchamp_gold.img
-          zip -0 -r HyperOS_M34_Gold_Edition.zip system_duchamp_gold.img
+          img2simg system_raw.img system_optimized.img
+          zip -0 -r HyperOS_Duchamp_Optimized.zip system_optimized.img
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: HyperOS_M34_Gold_Edition
-          path: work/HyperOS_M34_Gold_Edition.zip
+          name: HyperOS_Duchamp_Optimized
+          path: work/HyperOS_Duchamp_Optimized.zip
