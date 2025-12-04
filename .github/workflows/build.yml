@@ -1,14 +1,18 @@
-name: Build HyperOS M34 Ultimate (Duchamp + GApps + Fixes)
+name: Build HyperOS Ultimate M34
 on:
   workflow_dispatch:
     inputs:
       gsi_url:
-        description: 'HyperOS Duchamp URL'
+        description: 'Duchamp HyperOS URL'
         required: true
-        default: 'https://sourceforge.net/projects/mystic-gsi-updates/files/HyperOS/Hyperos-duchamp-15-OS2.0.6.0.VNBCNXM-AB-20241207-MysticGSI.zip/download'
+        default: 'https://sourceforge.net/projects/mystic-gsi-updates/files/HyperOS/Hyperos-duchamp-15-OS2.0.200.3.VNLCNXM-AB-20250416-MysticGSI.zip/download'
+      gapps_url:
+        description: 'LiteGApps URL'
+        required: true
+        default: 'https://sourceforge.net/projects/litegapps/files/litegapps/arm64/28/lite/2024-02-23/LiteGapps-arm64-13.0-20240223-official.zip/download'
 
 jobs:
-  build_ultimate_m34:
+  build_ultimate:
     runs-on: ubuntu-latest
     steps:
       - name: 1. Setup Tools
@@ -20,14 +24,13 @@ jobs:
           wget https://raw.githubusercontent.com/xpirt/sdat2img/master/sdat2img.py
           chmod +x sdat2img.py
 
-      - name: 2. Download Base ROM
+      - name: 2. Download & Prepare ROM
         run: |
           mkdir work
           cd work
           wget -O rom.zip "${{ inputs.gsi_url }}"
           unzip rom.zip
           
-          # Auto-find and prepare IMG
           FOUND_IMG=$(find . -maxdepth 1 -name "*.img" | head -n 1)
           if [ "$FOUND_IMG" != "./system.img" ] && [ "$FOUND_IMG" != "system.img" ]; then mv "$FOUND_IMG" system.img; fi
           
@@ -44,52 +47,41 @@ jobs:
           mkdir -p mnt/system
           sudo mount -o loop,rw system_raw.img mnt/system
 
-      - name: 4. Debloat (Remove Junk)
+      - name: 4. Debloat (Remove Junk & Treble App)
         run: |
           S_DIR="work/mnt/system/system"
-          echo "Debloating..."
+          # Removing PHH Treble App as requested
+          sudo rm -rf $S_DIR/app/PhhTrebleApp
+          sudo rm -rf $S_DIR/system/app/PhhTrebleApp
+          # Removing Heavy AI Bloat
           sudo rm -rf $S_DIR/app/MSA
           sudo rm -rf $S_DIR/app/AnalyticsCore
           sudo rm -rf $S_DIR/app/AiAsstVision
-          sudo rm -rf $S_DIR/app/VoiceTrigger
           sudo rm -rf $S_DIR/priv-app/Updater
 
-      - name: 5. Install Google Apps (LiteGApps)
+      - name: 5. Inject GApps (LiteGApps)
         run: |
           S_DIR="work/mnt/system/system"
-          echo "Downloading GApps..."
-          # Using LiteGApps (Flashable zip structure, extracting Core)
-          wget -O gapps.zip "https://sourceforge.net/projects/litegapps/files/litegapps/arm64/33/LiteGapps-Arm64-33-Core-v2.8.zip/download"
+          wget -O gapps.zip "${{ inputs.gapps_url }}"
           mkdir gapps_temp
           unzip gapps.zip -d gapps_temp
           
-          # Inject Play Store & Services directly
-          # Note: This is a basic manual injection.
-          echo "Injecting GApps to System..."
-          # Depending on LiteGApps structure, we move folders. 
-          # Usually it has a 'system' folder inside.
+          echo "Injecting GApps..."
+          # Copy GApps into system (LiteGApps structure varies, we catch both cases)
           if [ -d "gapps_temp/system" ]; then
-             sudo cp -r gapps_temp/system/* work/mnt/system/system/
+             sudo cp -r gapps_temp/system/* $S_DIR/
+          elif [ -d "gapps_temp/litegapps/system" ]; then
+             sudo cp -r gapps_temp/litegapps/system/* $S_DIR/
           else
-             # Fallback generic copy (structure varies)
-             sudo cp -r gapps_temp/* work/mnt/system/system/ 2>/dev/null || true
+             # Direct copy fallback
+             sudo cp -r gapps_temp/* $S_DIR/ 2>/dev/null || true
           fi
           
-          # Set permissions for GApps
+          # Fix Permissions for Play Store
           sudo chmod -R 755 $S_DIR/priv-app/Phonesky
           sudo chmod -R 755 $S_DIR/priv-app/GmsCore
 
-      - name: 6. Install PHH Treble App
-        run: |
-          S_DIR="work/mnt/system/system"
-          echo "Installing PHH Treble Settings..."
-          wget -O phh.apk "https://github.com/phhusson/treble_app/releases/download/v8.14/TrebleApp.apk"
-          
-          sudo mkdir -p $S_DIR/system/app/PhhTrebleApp
-          sudo cp phh.apk $S_DIR/system/app/PhhTrebleApp/PhhTrebleApp.apk
-          sudo chmod 644 $S_DIR/system/app/PhhTrebleApp/PhhTrebleApp.apk
-
-      - name: 7. Inject M34 Overlay
+      - name: 6. Inject M34 Overlay
         run: |
           git clone https://github.com/phoenixeditz1357-cmd/M34-Overlays overlay_repo
           OVERLAY_APK=$(find overlay_repo -name "*.apk" | head -n 1)
@@ -101,30 +93,37 @@ jobs:
              sudo chmod 644 "$TARGET/treble-overlay-samsung-m34x.apk"
           fi
 
-      - name: 8. Apply M34 Optimizations (AOD/Storage/Lockscreen)
+      - name: 7. OPTIMIZATIONS (Storage, Wake Delay, AOD)
         run: |
           PROP="work/mnt/system/system/build.prop"
           
-          # 1. STORAGE FIX
+          # A. SCREEN WAKE DELAY FIX (2-4s Delay Fix)
+          # We disable deep sleep checks for fingerprint wake
+          echo "ro.fingerprint.cleanup_unused_fingerprints=false" | sudo tee -a $PROP
+          echo "power.noninteractive.nap_time=0" | sudo tee -a $PROP
+          echo "ro.bq.gpu_to_cpu_unsupported=1" | sudo tee -a $PROP
+          
+          # B. STORAGE FIX (Perfect Detection)
           echo "persist.sys.fuse.passthrough.enable=true" | sudo tee -a $PROP
           
-          # 2. AOD & LOCKSCREEN FIX (Flagship Identity)
+          # C. AOD & LOCKSCREEN EDITOR (Houji Spoof)
+          # This forces HyperOS to show the "Magazine" Lockscreen Editor
           echo "ro.product.device=houji" | sudo tee -a $PROP
           echo "ro.miui.ui.version.code=14" | sudo tee -a $PROP
           
-          # 3. SIM & SIGNAL
+          # D. SIGNAL STABILITY
           echo "persist.dbg.ims_volte_enable=1" | sudo tee -a $PROP
           echo "ro.build.fingerprint=samsung/m34x/m34x:14/UP1A.231005.007/M346BXXS3CXE1:user/release-keys" | sudo tee -a $PROP
 
-      - name: 9. Repack
+      - name: 8. Repack
         run: |
           cd work
           sudo umount mnt/system
-          img2simg system_raw.img system_m34_ultimate.img
-          zip -0 -r HyperOS_M34_Ultimate_GApps.zip system_m34_ultimate.img
+          img2simg system_raw.img system_ultimate_m34.img
+          zip -0 -r HyperOS_Ultimate_M34.zip system_ultimate_m34.img
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: HyperOS_M34_Ultimate_GApps
-          path: work/HyperOS_M34_Ultimate_GApps.zip
+          name: HyperOS_Ultimate_M34
+          path: work/HyperOS_Ultimate_M34.zip
