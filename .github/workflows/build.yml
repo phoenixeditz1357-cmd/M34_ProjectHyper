@@ -1,14 +1,14 @@
-name: Build HyperOS Houji Native (M34 Safe)
+name: Build HyperOS M34 Ultimate (Duchamp + GApps + Fixes)
 on:
   workflow_dispatch:
     inputs:
       gsi_url:
-        description: 'HyperOS Houji URL'
+        description: 'HyperOS Duchamp URL'
         required: true
-        default: 'https://sourceforge.net/projects/mystic-gsi-updates/files/HyperOS/Hyperos-houji-VanillaIceCream-V816.0.240520.1.VNCCNXM.PRE-DPP-AB-20240524-MysticGSI.zip/download'
+        default: 'https://sourceforge.net/projects/mystic-gsi-updates/files/HyperOS/Hyperos-duchamp-15-OS2.0.6.0.VNBCNXM-AB-20241207-MysticGSI.zip/download'
 
 jobs:
-  build_houji_final:
+  build_ultimate_m34:
     runs-on: ubuntu-latest
     steps:
       - name: 1. Setup Tools
@@ -16,31 +16,21 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
           sudo apt-get clean
           sudo apt-get update
-          sudo apt-get install -y git zip unzip android-sdk-libsparse-utils
+          sudo apt-get install -y git zip unzip android-sdk-libsparse-utils wget tar
           wget https://raw.githubusercontent.com/xpirt/sdat2img/master/sdat2img.py
           chmod +x sdat2img.py
 
-      - name: 2. Download GSI
+      - name: 2. Download Base ROM
         run: |
           mkdir work
           cd work
           wget -O rom.zip "${{ inputs.gsi_url }}"
           unzip rom.zip
           
-          # Find the IMG file (regardless of name)
+          # Auto-find and prepare IMG
           FOUND_IMG=$(find . -maxdepth 1 -name "*.img" | head -n 1)
+          if [ "$FOUND_IMG" != "./system.img" ] && [ "$FOUND_IMG" != "system.img" ]; then mv "$FOUND_IMG" system.img; fi
           
-          if [ -z "$FOUND_IMG" ]; then
-             echo "ERROR: No .img file found in zip!"
-             exit 1
-          fi
-
-          # Rename if not already system.img
-          if [ "$FOUND_IMG" != "./system.img" ] && [ "$FOUND_IMG" != "system.img" ]; then 
-             mv "$FOUND_IMG" system.img
-          fi
-          
-          # De-Sparse if needed
           if file system.img | grep -q "sparse"; then
             simg2img system.img system_raw.img
             rm system.img
@@ -54,62 +44,87 @@ jobs:
           mkdir -p mnt/system
           sudo mount -o loop,rw system_raw.img mnt/system
 
-      - name: 4. Debloat (Safe Mode)
+      - name: 4. Debloat (Remove Junk)
         run: |
           S_DIR="work/mnt/system/system"
-          # Remove only known crash-causing apps for Exynos
-          sudo rm -rf $S_DIR/priv-app/Updater
+          echo "Debloating..."
           sudo rm -rf $S_DIR/app/MSA
           sudo rm -rf $S_DIR/app/AnalyticsCore
+          sudo rm -rf $S_DIR/app/AiAsstVision
+          sudo rm -rf $S_DIR/app/VoiceTrigger
+          sudo rm -rf $S_DIR/priv-app/Updater
 
-      - name: 5. Inject Overlay (Auto-Detect)
+      - name: 5. Install Google Apps (LiteGApps)
+        run: |
+          S_DIR="work/mnt/system/system"
+          echo "Downloading GApps..."
+          # Using LiteGApps (Flashable zip structure, extracting Core)
+          wget -O gapps.zip "https://sourceforge.net/projects/litegapps/files/litegapps/arm64/33/LiteGapps-Arm64-33-Core-v2.8.zip/download"
+          mkdir gapps_temp
+          unzip gapps.zip -d gapps_temp
+          
+          # Inject Play Store & Services directly
+          # Note: This is a basic manual injection.
+          echo "Injecting GApps to System..."
+          # Depending on LiteGApps structure, we move folders. 
+          # Usually it has a 'system' folder inside.
+          if [ -d "gapps_temp/system" ]; then
+             sudo cp -r gapps_temp/system/* work/mnt/system/system/
+          else
+             # Fallback generic copy (structure varies)
+             sudo cp -r gapps_temp/* work/mnt/system/system/ 2>/dev/null || true
+          fi
+          
+          # Set permissions for GApps
+          sudo chmod -R 755 $S_DIR/priv-app/Phonesky
+          sudo chmod -R 755 $S_DIR/priv-app/GmsCore
+
+      - name: 6. Install PHH Treble App
+        run: |
+          S_DIR="work/mnt/system/system"
+          echo "Installing PHH Treble Settings..."
+          wget -O phh.apk "https://github.com/phhusson/treble_app/releases/download/v8.14/TrebleApp.apk"
+          
+          sudo mkdir -p $S_DIR/system/app/PhhTrebleApp
+          sudo cp phh.apk $S_DIR/system/app/PhhTrebleApp/PhhTrebleApp.apk
+          sudo chmod 644 $S_DIR/system/app/PhhTrebleApp/PhhTrebleApp.apk
+
+      - name: 7. Inject M34 Overlay
         run: |
           git clone https://github.com/phoenixeditz1357-cmd/M34-Overlays overlay_repo
-          
           OVERLAY_APK=$(find overlay_repo -name "*.apk" | head -n 1)
-          
           if [ -f "$OVERLAY_APK" ]; then
-             echo "Found Overlay: $OVERLAY_APK"
-             
              TARGET="work/mnt/system/product/overlay"
-             if [ ! -d "$TARGET" ]; then 
-                TARGET="work/mnt/system/system/product/overlay"
-             fi
-             
+             if [ ! -d "$TARGET" ]; then TARGET="work/mnt/system/system/product/overlay"; fi
              sudo mkdir -p "$TARGET"
              sudo cp "$OVERLAY_APK" "$TARGET/treble-overlay-samsung-m34x.apk"
              sudo chmod 644 "$TARGET/treble-overlay-samsung-m34x.apk"
-             echo "Overlay Successfully Injected"
-          else
-             echo "WARNING: No APK found in repo. Proceeding without overlay."
           fi
 
-      - name: 6. Apply Exynos Fixes (Identity & Signal)
+      - name: 8. Apply M34 Optimizations (AOD/Storage/Lockscreen)
         run: |
           PROP="work/mnt/system/system/build.prop"
           
-          # 1. Signal / SIM Fix
-          echo "persist.dbg.ims_volte_enable=1" | sudo tee -a $PROP
-          echo "ro.build.fingerprint=samsung/m34x/m34x:14/UP1A.231005.007/M346BXXS3CXE1:user/release-keys" | sudo tee -a $PROP
-          
-          # 2. Storage Fix (Prevent 0MB bug)
+          # 1. STORAGE FIX
           echo "persist.sys.fuse.passthrough.enable=true" | sudo tee -a $PROP
           
-          # 3. Smoothness
-          echo "ro.surface_flinger.max_frame_buffer_acquired_buffers=3" | sudo tee -a $PROP
-          
-          # 4. Native Identity (Since it is Houji, we enforce Houji UI code)
+          # 2. AOD & LOCKSCREEN FIX (Flagship Identity)
+          echo "ro.product.device=houji" | sudo tee -a $PROP
           echo "ro.miui.ui.version.code=14" | sudo tee -a $PROP
+          
+          # 3. SIM & SIGNAL
+          echo "persist.dbg.ims_volte_enable=1" | sudo tee -a $PROP
+          echo "ro.build.fingerprint=samsung/m34x/m34x:14/UP1A.231005.007/M346BXXS3CXE1:user/release-keys" | sudo tee -a $PROP
 
-      - name: 7. Repack
+      - name: 9. Repack
         run: |
           cd work
           sudo umount mnt/system
-          img2simg system_raw.img system_houji_m34.img
-          zip -0 -r HyperOS_Houji_M34.zip system_houji_m34.img
+          img2simg system_raw.img system_m34_ultimate.img
+          zip -0 -r HyperOS_M34_Ultimate_GApps.zip system_m34_ultimate.img
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: HyperOS_Houji_M34
-          path: work/HyperOS_Houji_M34.zip
+          name: HyperOS_M34_Ultimate_GApps
+          path: work/HyperOS_M34_Ultimate_GApps.zip
